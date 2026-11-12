@@ -3,16 +3,16 @@ name: Try to Create OCI VM
 
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "17 * * * *"
   workflow_dispatch:
 
 permissions:
   contents: read
-  
+
 concurrency:
   group: oci-a1-vm-creation
   cancel-in-progress: false
-  
+
 env:
   COMPARTMENT_ID: ${{ secrets.OCI_COMPARTMENT_ID }}
   SUBNET_ID: ${{ secrets.SUBNET_ID }}
@@ -81,7 +81,7 @@ jobs:
           echo "Fetching Ubuntu 24.04 ARM image..."
 
           IMAGE_ID=$(oci compute image list \
-            --compartment-id "$COMPARTMENT_ID" \
+            --compartment-id "$OCI_CLI_TENANCY" \
             --operating-system "Canonical Ubuntu" \
             --operating-system-version "24.04" \
             --shape "VM.Standard.A1.Flex" \
@@ -123,9 +123,59 @@ jobs:
 
           echo "Validation completed successfully"
 
+      - name: Check Existing VM
+        id: existing_vm
+        run: |
+          set -euo pipefail
+
+          echo "Checking for existing coolify-vm..."
+
+          INSTANCE_LIST=$(oci compute instance list \
+            --compartment-id "$COMPARTMENT_ID" \
+            --all \
+            --output json)
+
+          EXISTING_INSTANCE=$(echo "$INSTANCE_LIST" | jq -r '
+            [
+              .data[]
+              | select(."display-name" == "coolify-vm")
+              | . as $instance
+              | select(
+                  (
+                    [
+                      "PROVISIONING",
+                      "RUNNING",
+                      "STARTING",
+                      "STOPPING",
+                      "STOPPED",
+                      "TERMINATING"
+                    ]
+                    | index($instance."lifecycle-state")
+                  ) != null
+                )
+            ]
+            | .[0] // {}
+          ')
+
+          INSTANCE_ID=$(echo "$EXISTING_INSTANCE" | jq -r '.id // empty')
+          INSTANCE_STATE=$(echo "$EXISTING_INSTANCE" | jq -r '."lifecycle-state" // empty')
+
+          if [ -n "$INSTANCE_ID" ]; then
+            echo "Existing VM found."
+            echo "Instance ID: $INSTANCE_ID"
+            echo "Instance State: $INSTANCE_STATE"
+
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "instance_id=$INSTANCE_ID" >> "$GITHUB_OUTPUT"
+            echo "instance_state=$INSTANCE_STATE" >> "$GITHUB_OUTPUT"
+          else
+            echo "No existing coolify-vm found."
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Launch A1 Flex VM
         id: create_vm
-        continue-on-error: true
+        if: steps.existing_vm.outputs.exists == 'false'
         run: |
           set -euo pipefail
 
@@ -144,9 +194,7 @@ jobs:
 
           echo "Launching VM..."
 
-          set +e
-
-          oci --debug compute instance launch \
+          if ! oci compute instance launch \
             --compartment-id "$COMPARTMENT_ID" \
             --availability-domain "$AD_NAME" \
             --shape "VM.Standard.A1.Flex" \
@@ -158,22 +206,16 @@ jobs:
             --display-name "coolify-vm" \
             --output json \
             > "$RUNNER_TEMP/oci/launch-output.json" \
-            2> "$RUNNER_TEMP/oci/launch-error.log"
+            2> "$RUNNER_TEMP/oci/launch-error.log"; then
 
-          EXIT_CODE=$?
+            echo "OCI VM launch failed."
 
-          set -e
-
-          if [ "$EXIT_CODE" -ne 0 ]; then
-            echo "OCI VM launch failed"
-
-            # Keep diagnostics useful without dumping request headers.
             grep -E \
               'CannotParseRequest|ServiceError|status|message|code|operation_name|opc-request-id|Error:' \
               "$RUNNER_TEMP/oci/launch-error.log" \
               | tail -40 || true
 
-            exit "$EXIT_CODE"
+            exit 1
           fi
 
           cat "$RUNNER_TEMP/oci/launch-output.json"
@@ -189,14 +231,13 @@ jobs:
             exit 1
           fi
 
-          echo "INSTANCE_ID=$INSTANCE_ID" >> "$GITHUB_OUTPUT"
-          echo "INSTANCE_STATE=$INSTANCE_STATE" >> "$GITHUB_OUTPUT"
+          echo "instance_id=$INSTANCE_ID" >> "$GITHUB_OUTPUT"
+          echo "instance_state=$INSTANCE_STATE" >> "$GITHUB_OUTPUT"
 
           echo "VM launch accepted!"
           echo "Instance ID: $INSTANCE_ID"
           echo "Instance State: $INSTANCE_STATE"
 
-      
       - name: Send Discord Notification
         if: always()
         uses: sarisia/actions-status-discord@v1.15.4
@@ -209,9 +250,10 @@ jobs:
             OCI A1.Flex VM creation attempt.
 
             Job Status: ${{ job.status }}
-            VM Step: ${{ steps.create_vm.outcome }}
+            Existing VM Check: ${{ steps.existing_vm.outcome }}
+            Launch Step: ${{ steps.create_vm.outcome }}
 
-            Instance ID: ${{ steps.create_vm.outputs.INSTANCE_ID }}
-            Instance State: ${{ steps.create_vm.outputs.INSTANCE_STATE }}
+            Instance ID: ${{ steps.create_vm.outputs.instance_id || steps.existing_vm.outputs.instance_id || 'Not available' }}
+            Instance State: ${{ steps.create_vm.outputs.instance_state || steps.existing_vm.outputs.instance_state || 'Not available' }}
 
             Workflow: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
