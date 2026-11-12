@@ -49,24 +49,14 @@ jobs:
           
           echo "${{ secrets.SSH_PUBLIC_KEY }}" > /home/runner/my_ssh_key.pub
 
-          # 1. Automatically get the correct AD Name for your tenancy
-          echo "Fetching Availability Domain..."
-          AD_NAME=$(oci iam availability-domain list --compartment-id "$COMPARTMENT_ID" --query "data[0].name" --raw-output)
-          echo "Using AD: $AD_NAME"
-
-          # 2. Automatically get the latest Ubuntu 24.04 ARM Image ID
-          echo "Fetching Ubuntu 24.04 ARM Image..."
-          IMAGE_ID=$(oci compute image list --compartment-id "$COMPARTMENT_ID" --operating-system "Canonical Ubuntu" --operating-system-version "24.04" --shape "VM.Standard.A1.Flex" --query "data[0].id" --raw-output)
-          echo "Using Image ID: $IMAGE_ID"
-
-          # 3. Try to launch the instance
+          # Attempt to launch the instance using the values from your secrets
           OCI_OUTPUT=$(oci compute instance launch \
             --compartment-id "$COMPARTMENT_ID" \
-            --availability-domain "$AD_NAME" \
+            --availability-domain "${{ secrets.AD_NAME }}" \
             --shape "VM.Standard.A1.Flex" \
             --shape-config '{"ocpus":2,"memoryInGBs":12}' \
             --subnet-id "$SUBNET_ID" \
-            --image-id "$IMAGE_ID" \
+            --image-id "${{ secrets.IMAGE_ID }}" \
             --ssh-authorized-keys-file "/home/runner/my_ssh_key.pub" \
             --assign-public-ip true \
             --display-name "coolify-vm" \
