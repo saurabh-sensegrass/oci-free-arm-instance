@@ -8,7 +8,11 @@ on:
 
 permissions:
   contents: read
-
+  
+concurrency:
+  group: oci-a1-vm-creation
+  cancel-in-progress: false
+  
 env:
   COMPARTMENT_ID: ${{ secrets.OCI_COMPARTMENT_ID }}
   SUBNET_ID: ${{ secrets.SUBNET_ID }}
@@ -192,21 +196,22 @@ jobs:
           echo "Instance ID: $INSTANCE_ID"
           echo "Instance State: $INSTANCE_STATE"
 
+      
       - name: Send Discord Notification
         if: always()
         uses: sarisia/actions-status-discord@v1.15.4
         with:
           webhook: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          title: "OCI VM Status: ${{ steps.create_vm.outcome }}"
-          status: ${{ steps.create_vm.outcome }}
-          color: ${{ steps.create_vm.outcome == 'success' && '0x28a745' || '0xdc3545' }}
+          title: "OCI VM Status: ${{ job.status }}"
+          status: ${{ job.status == 'success' && 'success' || job.status == 'cancelled' && 'cancelled' || 'failure' }}
+          color: ${{ job.status == 'success' && '0x28a745' || '0xdc3545' }}
           description: |
             OCI A1.Flex VM creation attempt.
 
-            Status: ${{ steps.create_vm.outcome }}
+            Job Status: ${{ job.status }}
+            VM Step: ${{ steps.create_vm.outcome }}
 
             Instance ID: ${{ steps.create_vm.outputs.INSTANCE_ID }}
-
             Instance State: ${{ steps.create_vm.outputs.INSTANCE_STATE }}
 
             Workflow: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
