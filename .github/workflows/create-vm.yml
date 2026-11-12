@@ -1,8 +1,13 @@
+
 name: Try to Create OCI VM
+
 on:
   schedule:
     - cron: "*/5 * * * *"
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 env:
   COMPARTMENT_ID: ${{ secrets.OCI_COMPARTMENT_ID }}
@@ -12,75 +17,180 @@ env:
   OCI_CLI_TENANCY: ${{ secrets.OCI_TENANCY }}
   OCI_CLI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
   OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CLI_KEY_CONTENT }}
-  SUPPRESS_LABEL_WARNING: True
+  SSH_PUBLIC_KEY: ${{ secrets.SSH_PUBLIC_KEY }}
+  SUPPRESS_LABEL_WARNING: "True"
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Cache pip packages
-        id: cache-pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.local
-          key: ${{ runner.os }}-pip-oci-cli-v1
-
-      - name: Add OCI CLI to path
-        run: echo "$HOME/.local/bin" >> $GITHUB_PATH
-
-      - name: Setup OCI CLI and Try to Create VM
-        id: create_vm
-        continue-on-error: true 
+      - name: Install OCI CLI and dependencies
         run: |
-          set -o pipefail
-
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y jq
+          python -m pip install --upgrade pip
           pip install oci-cli
 
-          mkdir -p ~/.oci
-          echo "${{ secrets.OCI_CLI_KEY_CONTENT }}" > ~/.oci/oci_api_key.pem
-          chmod 600 ~/.oci/oci_api_key.pem
+      - name: Configure OCI credentials
+        run: |
+          set -euo pipefail
 
-          echo "[DEFAULT]" > ~/.oci/config
-          echo "user=${{ env.OCI_CLI_USER }}" >> ~/.oci/config
-          echo "tenancy=${{ env.OCI_CLI_TENANCY }}" >> ~/.oci/config
-          echo "fingerprint=${{ env.OCI_CLI_FINGERPRINT }}" >> ~/.oci/config
-          echo "key_file=~/.oci/oci_api_key.pem" >> ~/.oci/config
-          echo "region=${{ env.OCI_CLI_REGION }}" >> ~/.oci/config
-          
-          echo "${{ secrets.SSH_PUBLIC_KEY }}" > /home/runner/my_ssh_key.pub
+          mkdir -p "$HOME/.oci"
 
-          echo "Fetching the correct Availability Domain..."
-          AD_NAME=$(oci iam availability-domain list --compartment-id "${{ secrets.OCI_TENANCY }}" --query "data[0].name" --raw-output)
-          echo "Using AD: $AD_NAME"
+          printf '%s\n' "$OCI_CLI_KEY_CONTENT" \
+            > "$HOME/.oci/oci_api_key.pem"
 
-          echo "Fetching Ubuntu 24.04 ARM Image..."
-          IMAGE_ID=$(oci compute image list --compartment-id "${{ secrets.OCI_TENANCY }}" --operating-system "Canonical Ubuntu" --operating-system-version "24.04" --shape "VM.Standard.A1.Flex" --query "data[0].id" --raw-output)
-          echo "Using Image ID: $IMAGE_ID"
+          chmod 600 "$HOME/.oci/oci_api_key.pem"
 
-          echo "Attempting to launch instance..."
-          OCI_OUTPUT=$(oci compute instance launch \
+          cat > "$HOME/.oci/config" <<EOF
+          [DEFAULT]
+          user=$OCI_CLI_USER
+          tenancy=$OCI_CLI_TENANCY
+          fingerprint=$OCI_CLI_FINGERPRINT
+          key_file=$HOME/.oci/oci_api_key.pem
+          region=$OCI_CLI_REGION
+          EOF
+
+          oci iam region list --output table
+
+      - name: Validate OCI resources
+        id: validate
+        run: |
+          set -euo pipefail
+
+          echo "Fetching Availability Domain..."
+
+          AD_NAME=$(oci iam availability-domain list \
+            --compartment-id "$OCI_CLI_TENANCY" \
+            --query 'data[0].name' \
+            --raw-output)
+
+          if [ -z "$AD_NAME" ] || [ "$AD_NAME" = "None" ]; then
+            echo "ERROR: No Availability Domain found"
+            exit 1
+          fi
+
+          echo "Availability Domain: $AD_NAME"
+
+          echo "Fetching Ubuntu 24.04 ARM image..."
+
+          IMAGE_ID=$(oci compute image list \
+            --compartment-id "$COMPARTMENT_ID" \
+            --operating-system "Canonical Ubuntu" \
+            --operating-system-version "24.04" \
+            --shape "VM.Standard.A1.Flex" \
+            --all \
+            --query 'data[0].id' \
+            --raw-output)
+
+          if [ -z "$IMAGE_ID" ] || [ "$IMAGE_ID" = "None" ]; then
+            echo "ERROR: No compatible ARM image found"
+            exit 1
+          fi
+
+          echo "Image ID: $IMAGE_ID"
+
+          echo "Validating subnet..."
+
+          SUBNET_JSON=$(oci network subnet get \
+            --subnet-id "$SUBNET_ID")
+
+          PROHIBIT_PUBLIC_IP=$(echo "$SUBNET_JSON" | \
+            jq -r '.data."prohibit-public-ip-on-vnic"')
+
+          if [ "$PROHIBIT_PUBLIC_IP" = "true" ]; then
+            ASSIGN_PUBLIC_IP="false"
+          else
+            ASSIGN_PUBLIC_IP="true"
+          fi
+
+          if [ -z "$SSH_PUBLIC_KEY" ]; then
+            echo "ERROR: SSH_PUBLIC_KEY secret is missing"
+            exit 1
+          fi
+
+          {
+            echo "AD_NAME=$AD_NAME"
+            echo "IMAGE_ID=$IMAGE_ID"
+            echo "ASSIGN_PUBLIC_IP=$ASSIGN_PUBLIC_IP"
+          } >> "$GITHUB_ENV"
+
+          echo "Validation completed successfully"
+
+      - name: Launch A1 Flex VM
+        id: create_vm
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$RUNNER_TEMP/oci"
+
+          printf '%s\n' "$SSH_PUBLIC_KEY" \
+            > "$RUNNER_TEMP/oci/ssh.pub"
+
+          jq -n \
+            --arg image "$IMAGE_ID" \
+            '{
+              sourceType: "image",
+              imageId: $image,
+              bootVolumeSizeInGBs: 150
+            }' > "$RUNNER_TEMP/oci/source-details.json"
+
+          echo "Launching VM..."
+
+          set +e
+
+          oci --debug compute instance launch \
             --compartment-id "$COMPARTMENT_ID" \
             --availability-domain "$AD_NAME" \
             --shape "VM.Standard.A1.Flex" \
             --shape-config '{"ocpus":2,"memoryInGBs":12}' \
             --subnet-id "$SUBNET_ID" \
-            --image-id "$IMAGE_ID" \
-            --ssh-authorized-keys-file "/home/runner/my_ssh_key.pub" \
-            --assign-public-ip true \
+            --source-details "file://$RUNNER_TEMP/oci/source-details.json" \
+            --ssh-authorized-keys-file "$RUNNER_TEMP/oci/ssh.pub" \
+            --assign-public-ip "$ASSIGN_PUBLIC_IP" \
             --display-name "coolify-vm" \
-            --boot-volume-size-in-gbs 150 2>&1 || true)
+            --output json \
+            > "$RUNNER_TEMP/oci/launch-output.json" \
+            2> "$RUNNER_TEMP/oci/launch-error.log"
 
-          echo "log_data<<EOF" >> $GITHUB_OUTPUT
-          echo "$OCI_OUTPUT" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          EXIT_CODE=$?
 
-          if echo "$OCI_OUTPUT" | grep -q '"lifecycle-state": "PROVISIONING"'; then
-            echo "Success! 'PROVISIONING' state found in output."
-            exit 0
-          else
-            echo "Error: Success string not found in OCI output. Failing the step."
+          set -e
+
+          if [ "$EXIT_CODE" -ne 0 ]; then
+            echo "OCI VM launch failed"
+
+            # Keep diagnostics useful without dumping request headers.
+            grep -E \
+              'CannotParseRequest|ServiceError|status|message|code|operation_name|opc-request-id|Error:' \
+              "$RUNNER_TEMP/oci/launch-error.log" \
+              | tail -40 || true
+
+            exit "$EXIT_CODE"
+          fi
+
+          cat "$RUNNER_TEMP/oci/launch-output.json"
+
+          INSTANCE_ID=$(jq -r '.data.id // empty' \
+            "$RUNNER_TEMP/oci/launch-output.json")
+
+          INSTANCE_STATE=$(jq -r '.data."lifecycle-state" // empty' \
+            "$RUNNER_TEMP/oci/launch-output.json")
+
+          if [ -z "$INSTANCE_ID" ]; then
+            echo "ERROR: Instance ID missing from OCI response"
             exit 1
           fi
+
+          echo "INSTANCE_ID=$INSTANCE_ID" >> "$GITHUB_OUTPUT"
+          echo "INSTANCE_STATE=$INSTANCE_STATE" >> "$GITHUB_OUTPUT"
+
+          echo "VM launch accepted!"
+          echo "Instance ID: $INSTANCE_ID"
+          echo "Instance State: $INSTANCE_STATE"
 
       - name: Send Discord Notification
         if: always()
@@ -91,9 +201,12 @@ jobs:
           status: ${{ steps.create_vm.outcome }}
           color: ${{ steps.create_vm.outcome == 'success' && '0x28a745' || '0xdc3545' }}
           description: |
-            Attempt to create A1.Flex VM.
-            **Status:** `${{ steps.create_vm.outcome }}`
+            OCI A1.Flex VM creation attempt.
 
-            **Log Output:**
-            ```json
-            ${{ steps.create_vm.outputs.log_data }}
+            Status: ${{ steps.create_vm.outcome }}
+
+            Instance ID: ${{ steps.create_vm.outputs.INSTANCE_ID }}
+
+            Instance State: ${{ steps.create_vm.outputs.INSTANCE_STATE }}
+
+            Workflow: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
