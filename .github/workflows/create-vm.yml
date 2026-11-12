@@ -7,10 +7,18 @@ on:
   workflow_dispatch:
 env:
   COMPARTMENT_ID: ${{ secrets.OCI_COMPARTMENT_ID }}
-  IMAGE_ID: "ocid1.image.oc1.ap-singapore-1.aaaaaaaa5a3xwkk5vaichk47fms2uzvsqeriats2uorf6kwgq3l3nwrbhipa"
+  
+  # ⚠️ CRITICAL: You MUST replace this with your Mumbai Ubuntu 24.04 ARM Image OCID
+  IMAGE_ID: "ocid1.image.oc1.ap-mumbai-1.aaaaaaaav3mslmpbtcr57mpxr72o726ip446yevlvshmgtlmmhit55kwioqq"
+  
   SUBNET_ID: ${{ secrets.OCI_SUBNET_ID }}
-  AD_NAME: "KClJ:AP-SINGAPORE-1-AD-1"
-  OCI_CLI_REGION: "ap-singapore-1"
+  
+  # ⚠️ CRITICAL: Change this to your Mumbai Availability Domain
+  AD_NAME: "mKgE:AP-MUMBAI-1-AD-1" 
+  
+  # ⚠️ CRITICAL: Change region to Mumbai
+  OCI_CLI_REGION: "ap-mumbai-1"
+  
   OCI_CLI_USER: ${{ secrets.OCI_CLI_USER }}
   OCI_CLI_TENANCY: ${{ secrets.OCI_CLI_TENANCY }}
   OCI_CLI_FINGERPRINT: ${{ secrets.OCI_CLI_FINGERPRINT }}
@@ -52,17 +60,19 @@ jobs:
           echo "${{ secrets.SSH_PUBLIC_KEY }}" > /home/runner/my_ssh_key.pub
 
           # Run the command, capture ALL output, and use '|| true' to prevent the script from exiting early.
+          # ⚠️ UPDATED: shape-config now uses 2 OCPUs and 12 GB memory
+          # ⚠️ UPDATED: boot-volume-size-in-gbs changed to 150 to ensure it stays within your total 200GB free limit
           OCI_OUTPUT=$(oci compute instance launch \
             --compartment-id "$COMPARTMENT_ID" \
             --availability-domain "$AD_NAME" \
             --shape "VM.Standard.A1.Flex" \
-            --shape-config '{"ocpus":4,"memoryInGBs":24}' \
+            --shape-config '{"ocpus":2,"memoryInGBs":12}' \
             --subnet-id "$SUBNET_ID" \
             --image-id "$IMAGE_ID" \
             --ssh-authorized-keys-file "/home/runner/my_ssh_key.pub" \
             --assign-public-ip true \
-            --display-name "coolify-vm" \
-            --boot-volume-size-in-gbs 200 2>&1 || true)
+            --display-name "my-arm-vm" \
+            --boot-volume-size-in-gbs 150 2>&1 || true)
 
           # Store the log as a GitHub step output
           echo "log_data<<EOF" >> $GITHUB_OUTPUT
@@ -93,4 +103,3 @@ jobs:
             **Log Output:**
             ```json
             ${{ steps.create_vm.outputs.log_data }}
-            ```
