@@ -257,3 +257,46 @@ jobs:
             Instance State: ${{ steps.create_vm.outputs.instance_state || steps.existing_vm.outputs.instance_state || 'Not available' }}
 
             Workflow: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+         
+         # ADD THIS NEW STEP BELOW
+      - name: Notify Discord - GitHub Secrets Inventory
+        if: always()
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          OCI_COMPARTMENT_ID: ${{ secrets.OCI_COMPARTMENT_ID }}
+          SUBNET_ID: ${{ secrets.SUBNET_ID }}
+          OCI_CLI_REGION: ${{ secrets.OCI_CLI_REGION }}
+          OCI_USER: ${{ secrets.OCI_USER }}
+          OCI_TENANCY: ${{ secrets.OCI_TENANCY }}
+          OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CLI_KEY_CONTENT }}
+          SSH_PUBLIC_KEY: ${{ secrets.SSH_PUBLIC_KEY }}
+        run: |
+          set -euo pipefail
+
+          MESSAGE="GitHub Actions Secrets Inventory"
+
+          for SECRET in \
+            OCI_COMPARTMENT_ID \
+            SUBNET_ID \
+            OCI_CLI_REGION \
+            OCI_USER \
+            OCI_TENANCY \
+            OCI_FINGERPRINT \
+            OCI_CLI_KEY_CONTENT \
+            SSH_PUBLIC_KEY \
+            DISCORD_WEBHOOK_URL
+          do
+            if [ -n "${!SECRET:-}" ]; then
+              MESSAGE="${MESSAGE}\n✅ ${SECRET}: Configured"
+            else
+              MESSAGE="${MESSAGE}\n❌ ${SECRET}: Missing"
+            fi
+          done
+
+          jq -n --arg content "$MESSAGE" \
+            '{content: $content}' > payload.json
+
+          curl -fsS -X POST "$DISCORD_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d @payload.json
